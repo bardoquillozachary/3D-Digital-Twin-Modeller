@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>IIoT Digital Twin Builder V5 (LCD Scaling)</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', sans-serif; background: #111; color: white; }
+        .panel { position: absolute; background: rgba(20,20,20,0.9); padding: 15px; border-radius: 8px; border: 1px solid #444; z-index: 100; }
+        #toolbar { top: 10px; left: 10px; width: 220px; }
+        #inspector { top: 10px; right: 10px; width: 250px; display: none; max-height: calc(100vh - 60px); overflow-y: auto; }
+        h3 { margin-top: 0; font-size: 16px; color: #00ffcc; margin-bottom: 10px; }
+        button { width: 100%; margin: 5px 0; padding: 8px; cursor: pointer; background: #333; color: white; border: 1px solid #555; border-radius: 4px; transition: 0.2s; }
+        button:hover { background: #444; border-color: #00ffcc; }
+        button.active { background: #006655; border-color: #00ffcc; }
+        button.danger { background: #aa2222; border-color: #ff4444; margin-top: 15px; }
+        input, select { width: calc(100% - 16px); padding: 6px; margin: 5px 0; background: #222; border: 1px solid #444; color: white; }
+        .input-group { display: flex; gap: 5px; margin: 2px 0 8px 0; }
+        .input-group input { width: 100%; font-size: 11px; text-align: center; } /* Adjusted to 100% to fill flex evenly */
+        .transform-tools { display: flex; gap: 5px; margin-bottom: 10px; }
+        .transform-tools button { margin: 0; font-size: 12px; }
+        label { color:#00ffcc; font-size:12px; display:block; margin-top:10px; }
+        .component-panel { background: #2a2a2a; border: 1px solid #555; border-radius: 5px; padding: 10px; margin-bottom: 10px; position: relative; }
+        .component-title { color: #00ffcc; font-size: 14px; margin: 0 0 10px 0; text-transform: capitalize; }
+        .remove-component-btn {
+            position: absolute; top: 5px; right: 5px; background: #662222;
+            color: white; border: 1px solid #884444; border-radius: 50%;
+            width: 22px; height: 22px; line-height: 20px; padding: 0;
+            font-size: 12px; cursor: pointer;
+        }
+        .remove-component-btn:hover { background: #aa2222; }
+        .component-panel label { margin-top: 8px; }
+        .component-panel .input-group { margin-bottom: 5px; }
+    </style>
+</head>
+<body>
+
+<div id="toolbar" class="panel">
+    <h3>Build Tools</h3>
+    <button onclick="spawnObject('wall')">Add Wall</button>
+    <button onclick="spawnObject('door')">Add Door</button>
+    <button onclick="document.getElementById('file-input').click()">Import .GLB Model</button>
+    <input type="file" id="file-input" style="display:none" accept=".glb,.gltf">
+    
+    <hr style="border: 0; border-top: 1px dashed #444; margin: 10px 0;">
+    <button onclick="toggleSavedModels()" style="background:#0055aa;">📁 Saved Models ▼</button>
+    <div id="saved-models-list" style="display: none; grid-template-columns: 1fr 1fr; gap: 5px; margin-top: 5px; background: #222; padding: 5px; border-radius: 4px;"></div>
+</div>
+
+<div id="inspector" class="panel">
+    <h3>Object Inspector</h3>
+    <p id="obj-name" style="font-size:14px; color:#aaa; font-weight: bold; margin-bottom: 5px;"></p>
+    
+    <div class="transform-tools">
+        <button id="btn-translate" class="active" onclick="setTransformMode('translate')">Move</button>
+        <button id="btn-rotate" onclick="setTransformMode('rotate')">Rotate</button>
+        <button id="btn-scale" onclick="setTransformMode('scale')">Scale</button>
+    </div>
+
+    <div id="iot-settings" style="display: none; padding-top: 10px; border-top: 1px dashed #444;">
+        <div id="components-container">
+            <!-- Dynamically generated component settings will go here -->
+        </div>
+        <div class="input-group" style="margin-top: 10px;">
+            <button onclick="addComponent('display')">+ Add Display</button>
+            <button onclick="addComponent('button')">+ Add Button</button>
+        </div>
+        <hr style="border-color: #444; margin: 15px 0;">
+        <button onclick="saveIoTConfig()" style="background:#006655">Apply All IoT Settings</button>
+        <button onclick="saveAsNewVariant()" style="background:#0055aa; margin-top: 5px;">Save as New Model Variant</button>
+    </div>
+
+    <button class="danger" onclick="deleteSelectedObject()">🗑️ Delete Object</button>
+    <button onclick="exportProject()" style="background:#0055aa; margin-top: 10px;">Export JSON</button>
+</div>
+
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
+<script type="importmap">
+{
+    "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+}
+</script>
+
+<script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { TransformControls } from 'three/addons/controls/TransformControls.js';
+
+    // --- 1. Scene Setup ---
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x111111);
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(6, 6, 6);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    const loader = new GLTFLoader();
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+
+    scene.add(new THREE.GridHelper(30, 30, 0x444444, 0x222222));
+    const light = new THREE.DirectionalLight(0xffffff, 2);
+    light.position.set(5, 10, 7.5);
+    scene.add(light, new THREE.AmbientLight(0x606060));
+
+    // --- 2. State Setup ---
+    let selectedObject = null;
+    let objectCounter = 1;
+    let interactableObjects = [];
+    const mqttClient = mqtt.connect('ws://broker.emqx.io:8083/mqtt');
+
+    const transformControl = new TransformControls(camera, renderer.domElement);
+    transformControl.addEventListener('dragging-changed', (e) => { controls.enabled = !e.value; });
+    scene.add(transformControl);
+
+    // Camera Movement State
+    const keys = { w: false, a: false, s: false, d: false, arrowup: false, arrowdown: false, arrowleft: false, arrowright: false };
+
+    // --- 3. UI Helpers ---
+    window.spawnObject = (type) => {
+        let mesh;
+        if (type === 'wall') {
+            mesh = new THREE.Mesh(new THREE.BoxGeometry(4, 3, 0.2), new THREE.MeshStandardMaterial({ color: 0x888888 }));
+            mesh.position.set(0, 1.5, 0);
+            mesh.name = `Wall_${objectCounter++}`;
+        } else if (type === 'door') {
+            mesh = new THREE.Mesh(new THREE.BoxGeometry(1.5, 2.5, 0.25), new THREE.MeshStandardMaterial({ color: 0x553311 }));
+            mesh.position.set(0, 1.25, 0);
+            mesh.name = `Door_${objectCounter++}`;
+        }
+        mesh.userData = { isIoT: false };
+        scene.add(mesh);
+        interactableObjects.push(mesh);
+        selectObject(mesh);
+    };
+
+    document.getElementById('file-input').addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        
+        const formData = new FormData();
+        formData.append('modelFile', file);
+        
+        try {
+            const response = await fetch('/api/upload-model', {
+                method: 'POST',
+                body: formData
+            });
+            
+            const result = await response.json();
+            if (response.ok) {
+                loader.load(result.url, (gltf) => {
+                    const model = gltf.scene;
+                    model.name = `IoT_Device_${objectCounter++}`;
+                    model.userData = { isIoT: true, components: [], originalFilename: result.filename };
+                    scene.add(model);
+                    interactableObjects.push(model);
+                    selectObject(model);
+                });
+                
+                if (document.getElementById('saved-models-list').style.display !== 'none') {
+                    loadSavedModelsList();
+                }
+            } else {
+                alert('Upload failed: ' + result.error);
+            }
+        } catch (err) {
+            console.error('Error uploading file:', err);
+        }
+    });
+
+    window.toggleSavedModels = () => {
+        const el = document.getElementById('saved-models-list');
+        if (el.style.display === 'none') {
+            el.style.display = 'grid';
+            loadSavedModelsList();
+        } else {
+            el.style.display = 'none';
+        }
+    };
+
+    window.loadSavedModelsList = async () => {
+        try {
+            const res = await fetch('/api/models');
+            if (res.ok) {
+                const models = await res.json();
+                const listDiv = document.getElementById('saved-models-list');
+                listDiv.innerHTML = ''; 
+                if (models.length === 0) {
+                    listDiv.style.display = 'flex';
+                    listDiv.innerHTML = '<span style="color:#aaa; font-size:12px; text-align:center;">No saved models.</span>';
+                } else {
+                    listDiv.style.display = 'grid';
+                }
+                models.forEach(model => {
+                    const container = document.createElement('div');
+                    container.style.display = 'flex';
+                    container.style.flexDirection = 'column';
+                    container.style.alignItems = 'center';
+                    container.style.background = '#444';
+                    container.style.padding = '5px';
+                    container.style.borderRadius = '4px';
+                    container.style.cursor = 'pointer';
+                    container.style.border = '1px solid transparent';
+                    container.onmouseover = () => container.style.borderColor = '#00ffcc';
+                    container.onmouseout = () => container.style.borderColor = 'transparent';
+                    container.onclick = () => loadSavedModel(model);
+
+                    const viewer = document.createElement('model-viewer');
+                    viewer.src = `/uploads/${model}`;
+                    viewer.style.width = '100%';
+                    viewer.style.height = '80px';
+                    viewer.style.backgroundColor = '#222';
+                    viewer.style.borderRadius = '4px';
+                    viewer.style.pointerEvents = 'none'; // Prevent viewer from swallowing clicks
+                    viewer.setAttribute('auto-rotate', 'true');
+                    viewer.setAttribute('rotation-per-second', '30deg');
+                    viewer.setAttribute('interaction-prompt', 'none');
+
+                    const label = document.createElement('span');
+                    label.innerText = model;
+                    label.style.fontSize = '10px';
+                    label.style.marginTop = '5px';
+                    label.style.wordBreak = 'break-all';
+                    label.style.textAlign = 'center';
+
+                    container.appendChild(viewer);
+                    container.appendChild(label);
+                    listDiv.appendChild(container);
+                });
+            }
+        } catch (err) {
+            console.error("Failed to load saved models list.", err);
+        }
+    };
+
+    window.loadSavedModel = async (filename) => {
+        loader.load(`/uploads/${filename}`, async (gltf) => {
+            const model = gltf.scene;
+            model.name = `IoT_Device_${objectCounter++}`;
+            model.userData = { isIoT: true, components: [], originalFilename: filename };
+            
+            // Try fetching IoT configuration for this model
+            try {
+                const configRes = await fetch(`/api/config/${filename}`);
+                if (configRes.ok) {
+                    const configData = await configRes.json();
+                    if (configData.components) {
+                        configData.components.forEach(compConfig => {
+                            const component = { ...compConfig };
+
+                            // Re-generate the LCD graphical display from saved settings
+                            const mesh = createComponentMesh(component.id);
+                            
+                            mesh.position.set(compConfig.lcdConfig.offset.x, compConfig.lcdConfig.offset.y, compConfig.lcdConfig.offset.z);
+                            mesh.rotation.set(
+                                THREE.MathUtils.degToRad(compConfig.lcdConfig.rotation.x),
+                                THREE.MathUtils.degToRad(compConfig.lcdConfig.rotation.y),
+                                THREE.MathUtils.degToRad(compConfig.lcdConfig.rotation.z)
+                            );
+                            mesh.scale.set(compConfig.lcdConfig.scale.x, compConfig.lcdConfig.scale.y, 1);
+                            
+                            model.add(mesh);
+                            component.lcdMesh = mesh;
+                            component.lcdCanvas = mesh.material.map.image;
+                            component.lcdTexture = mesh.material.map;
+                            
+                            model.userData.components.push(component);
+                            
+                            drawCanvasLCD(component, 0);
+                            if (component.topic) mqttClient.subscribe(component.topic);
+                        });
+                    }
+                }
+            } catch (err) {
+                console.warn("No specific config found, applying base logic.", err);
+            }
+            
+            scene.add(model);
+            interactableObjects.push(model);
+            selectObject(model);
+        });
+    };
+
+    // --- 4. Selection Logic ---
+    window.addEventListener('click', (event) => {
+        if(event.target.tagName !== 'CANVAS') return; 
+        mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+        
+        const intersects = raycaster.intersectObjects(interactableObjects, true);
+        if (intersects.length > 0) {
+            const firstHit = intersects[0].object;
+            let target = firstHit;
+
+            // Did we click a component mesh?
+            if (firstHit.userData.componentId) {
+                let parentModel = firstHit;
+                while(parentModel.parent && parentModel.parent.type !== 'Scene') {
+                    if(interactableObjects.includes(parentModel)) break;
+                    parentModel = parentModel.parent;
+                }
+                
+                const component = parentModel.userData.components.find(c => c.id === firstHit.userData.componentId);
+                if (component && component.type === 'button' && component.topic) {
+                    const payload = component.publishPayload || "trigger";
+                    mqttClient.publish(component.topic, payload);
+                    console.log(`Published MQTT Message: [${payload}] to topic [${component.topic}]`);
+                    
+                    drawCanvasLCD(component, "PRESSED");
+                    setTimeout(() => drawCanvasLCD(component, ""), 150);
+                }
+                target = parentModel;
+            } else {
+                while(target.parent && target.parent.type !== 'Scene') {
+                    if(interactableObjects.includes(target)) break;
+                    target = target.parent;
+                }
+            }
+
+            selectObject(target);
+        } else {
+            transformControl.detach();
+            document.getElementById('inspector').style.display = 'none';
+            selectedObject = null;
+        }
+    });
+
+    function selectObject(obj) {
+        selectedObject = obj;
+        transformControl.attach(obj);
+        document.getElementById('inspector').style.display = 'block';
+        document.getElementById('obj-name').innerText = obj.name;
+        
+        const iotPanel = document.getElementById('iot-settings');
+        const componentsContainer = document.getElementById('components-container');
+        componentsContainer.innerHTML = ''; // Clear previous components
+
+        if (obj.userData.isIoT) {
+            iotPanel.style.display = 'block';
+            if (!obj.userData.components) {
+                obj.userData.components = [];
+            }
+            obj.userData.components.forEach(buildComponentUI);
+        } else {
+            iotPanel.style.display = 'none';
+        }
+    }
+
+    // --- 5. Canvas Textures & LCD Logic ---
+    function drawCanvasLCD(component, rawValue) {
+        if(!component || !component.lcdCanvas) return;
+        const canvas = component.lcdCanvas;
+        const ctx = canvas.getContext('2d');
+        const type = component.type;
+        const temp = component.template;
+        const val = parseFloat(rawValue) || 0;
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        if (type === 'display') {
+            if (temp === 'flowmeter') {
+                const max = component.maxVal || 10;
+                const total = (val * 16.5).toFixed(3); 
+                
+                ctx.fillStyle = '#8abdd8'; 
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                
+                ctx.fillStyle = '#0a365c'; 
+                ctx.font = 'italic bold 48px sans-serif';
+                ctx.textAlign = 'right';
+                ctx.fillText(val.toFixed(3), 200, 60);
+                
+                ctx.font = '16px sans-serif';
+                ctx.textAlign = 'right';
+                ctx.fillText('m³/h', 240, 80);
+                
+                const segs = 10;
+                const w = 18;
+                const pct = Math.min(Math.max(val / max, 0), 1);
+                const active = Math.round(pct * segs);
+                
+                for(let i=0; i<segs; i++) {
+                    ctx.beginPath();
+                    ctx.rect(15 + i*(w+2), 85, w, 15);
+                    ctx.lineWidth = 1.5;
+                    ctx.strokeStyle = '#0a365c';
+                    ctx.stroke();
+                    if(i < active) { ctx.fill(); }
+                }
+                
+                ctx.font = '16px sans-serif';
+                ctx.textAlign = 'left';
+                ctx.fillText(Math.round(pct*100)+'%', 220, 100);
+                
+                ctx.font = '22px sans-serif';
+                ctx.fillText('Σ+', 15, 140);
+                ctx.textAlign = 'right';
+                ctx.font = 'italic 20px sans-serif';
+                ctx.fillText(total + ' m³', 240, 140);
+            } else { 
+                ctx.fillStyle = 'rgba(0, 20, 0, 0.8)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.strokeStyle = '#00ff00';
+                ctx.lineWidth = 4;
+                ctx.strokeRect(0, 0, canvas.width, canvas.height);
+                
+                ctx.fillStyle = '#00ff00';
+                ctx.font = 'bold 36px monospace';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(val.toFixed(2), canvas.width/2, canvas.height/2);
+            }
+        } else if (type === 'button') {
+            const isPressed = rawValue === "PRESSED";
+            ctx.fillStyle = isPressed ? '#882222' : '#cc3333';
+            ctx.fillRect(5, 5, canvas.width - 10, canvas.height - 10);
+            
+            ctx.strokeStyle = isPressed ? '#ff4444' : '#ff8888';
+            ctx.lineWidth = 6;
+            ctx.strokeRect(5, 5, canvas.width - 10, canvas.height - 10);
+            
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 28px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(component.publishPayload || 'TRIGGER', canvas.width/2, canvas.height/2);
+        }
+        
+        if(component.lcdTexture) component.lcdTexture.needsUpdate = true;
+    }
+
+    window.saveIoTConfig = async () => {
+        if (!selectedObject || !selectedObject.userData.isIoT) return;
+        
+        const componentPanels = document.querySelectorAll('.component-panel');
+        
+        // Update the data objects from the UI
+        componentPanels.forEach(panel => {
+            const componentId = panel.dataset.componentId;
+            const component = selectedObject.userData.components.find(c => c.id === componentId);
+            if (!component) return;
+
+            // Update common properties
+            component.topic = panel.querySelector('.mqtt-topic').value;
+            
+            // Update transforms from UI
+            const mesh = component.lcdMesh;
+            mesh.position.set(
+                parseFloat(panel.querySelector('.pos-x').value),
+                parseFloat(panel.querySelector('.pos-y').value),
+                parseFloat(panel.querySelector('.pos-z').value)
+            );
+            mesh.rotation.set(
+                THREE.MathUtils.degToRad(parseFloat(panel.querySelector('.rot-x').value)),
+                THREE.MathUtils.degToRad(parseFloat(panel.querySelector('.rot-y').value)),
+                THREE.MathUtils.degToRad(parseFloat(panel.querySelector('.rot-z').value))
+            );
+            mesh.scale.set(
+                parseFloat(panel.querySelector('.scale-x').value) || 1,
+                parseFloat(panel.querySelector('.scale-y').value) || 1,
+                1
+            );
+
+            // Update type-specific properties
+            if (component.type === 'display') {
+                component.template = panel.querySelector('.template-type').value;
+                component.maxVal = parseFloat(panel.querySelector('.flow-max').value);
+            } else { // button
+                component.publishPayload = panel.querySelector('.button-payload').value;
+            }
+
+            // Resubscribe to new topic if it changed
+            if (component.topic) mqttClient.subscribe(component.topic);
+            
+            // Redraw the canvas with potentially new settings
+            drawCanvasLCD(component, 0);
+        });
+        
+        // Build the configData for saving to server
+        const configData = {
+            components: selectedObject.userData.components.map(c => {
+                const componentConfig = {
+                    id: c.id,
+                    type: c.type,
+                    topic: c.topic,
+                    lcdConfig: {
+                        offset: { x: c.lcdMesh.position.x, y: c.lcdMesh.position.y, z: c.lcdMesh.position.z },
+                        rotation: { x: THREE.MathUtils.radToDeg(c.lcdMesh.rotation.x), y: THREE.MathUtils.radToDeg(c.lcdMesh.rotation.y), z: THREE.MathUtils.radToDeg(c.lcdMesh.rotation.z) },
+                        scale: { x: c.lcdMesh.scale.x, y: c.lcdMesh.scale.y }
+                    }
+                };
+                if (c.type === 'display') {
+                    componentConfig.template = c.template;
+                    componentConfig.maxVal = c.maxVal;
+                } else {
+                    componentConfig.publishPayload = c.publishPayload;
+                }
+                return componentConfig;
+            })
+        };
+
+        try {
+            await fetch('/api/save-config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    modelName: selectedObject.userData.originalFilename || selectedObject.name, 
+                    configData 
+                })
+            });
+        } catch (err) {
+            console.error("Failed to save config to server:", err);
+        }
+    };
+
+    window.saveAsNewVariant = async () => {
+        if (!selectedObject || !selectedObject.userData.isIoT || !selectedObject.userData.originalFilename) {
+            alert("Can only create variants of imported .glb models.");
+            return;
+        }
+
+        const newName = prompt("Enter a name for the new model variant (e.g., Boiler_Room_Sensor):");
+        if (!newName) return;
+
+        await saveIoTConfig();
+        
+        const configData = {
+            components: selectedObject.userData.components.map(c => {
+                const componentConfig = {
+                    id: c.id,
+                    type: c.type,
+                    topic: c.topic,
+                    lcdConfig: {
+                        offset: { x: c.lcdMesh.position.x, y: c.lcdMesh.position.y, z: c.lcdMesh.position.z },
+                        rotation: { x: THREE.MathUtils.radToDeg(c.lcdMesh.rotation.x), y: THREE.MathUtils.radToDeg(c.lcdMesh.rotation.y), z: THREE.MathUtils.radToDeg(c.lcdMesh.rotation.z) },
+                        scale: { x: c.lcdMesh.scale.x, y: c.lcdMesh.scale.y }
+                    }
+                };
+                if (c.type === 'display') {
+                    componentConfig.template = c.template;
+                    componentConfig.maxVal = c.maxVal;
+                } else {
+                    componentConfig.publishPayload = c.publishPayload;
+                }
+                return componentConfig;
+            })
+        };
+
+        try {
+            const response = await fetch('/api/save-model-variant', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    originalModel: selectedObject.userData.originalFilename, 
+                    newModelName: newName,
+                    configData 
+                })
+            });
+
+            const result = await response.json();
+            if (response.ok) {
+                alert(result.message);
+                // Re-bind the object to the new filename so subsequent edits update the variant!
+                selectedObject.userData.originalFilename = result.filename; 
+                
+                // Refresh the saved models list if it's currently open
+                if (document.getElementById('saved-models-list').style.display !== 'none') {
+                    loadSavedModelsList();
+                }
+            } else {
+                alert('Failed to save variant: ' + result.error);
+            }
+        } catch (err) {
+            console.error("Error saving variant:", err);
+        }
+    };
+
+    // --- 6. Event Listeners ---
+    mqttClient.on('message', (topic, message) => {
+        interactableObjects.forEach(obj => {
+            if(obj.userData.isIoT && obj.userData.components) {
+                obj.userData.components.forEach(component => {
+                    if (component.type === 'display' && component.topic === topic) {
+                        drawCanvasLCD(component, message.toString());
+                    }
+                });
+            }
+        });
+    });
+
+    window.setTransformMode = (mode) => {
+        transformControl.setMode(mode);
+        document.getElementById('btn-translate').classList.remove('active');
+        document.getElementById('btn-rotate').classList.remove('active');
+        document.getElementById('btn-scale').classList.remove('active');
+        document.getElementById(`btn-${mode}`).classList.add('active');
+    };
+
+    window.deleteSelectedObject = () => {
+        if(!selectedObject) return;
+        transformControl.detach();
+        scene.remove(selectedObject);
+        interactableObjects = interactableObjects.filter(obj => obj !== selectedObject);
+        document.getElementById('inspector').style.display = 'none';
+        selectedObject = null;
+    };
+
+    // --- Camera Movement Listeners ---
+    window.addEventListener('keydown', (e) => {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+        const key = e.key.toLowerCase();
+        if (keys.hasOwnProperty(key)) keys[key] = true;
+    });
+
+    window.addEventListener('keyup', (e) => {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+        const key = e.key.toLowerCase();
+        if (keys.hasOwnProperty(key)) keys[key] = false;
+    });
+
+// --- 7. Export JSON to File ---
+    window.exportProject = () => {
+        // 1. Loop through all objects and extract their configuration
+        const data = interactableObjects.map(obj => {
+            // Standard data for all objects (Walls, Doors, Models)
+            const exp = {
+                name: obj.name,
+                type: obj.userData.isIoT ? 'IoT' : 'Structure',
+                position: { x: obj.position.x, y: obj.position.y, z: obj.position.z },
+                rotation: { x: obj.rotation.x, y: obj.rotation.y, z: obj.rotation.z },
+                scale: { x: obj.scale.x, y: obj.scale.y, z: obj.scale.z }
+            };
+            
+            // IoT-Specific Data
+            if (obj.userData.isIoT && obj.userData.components) {
+                exp.components = obj.userData.components.map(c => {
+                    const componentConfig = {
+                        id: c.id,
+                        type: c.type,
+                        topic: c.topic,
+                        lcdConfig: {
+                            offset: { x: c.lcdMesh.position.x, y: c.lcdMesh.position.y, z: c.lcdMesh.position.z },
+                            rotation: { x: THREE.MathUtils.radToDeg(c.lcdMesh.rotation.x), y: THREE.MathUtils.radToDeg(c.lcdMesh.rotation.y), z: THREE.MathUtils.radToDeg(c.lcdMesh.rotation.z) },
+                            scale: { x: c.lcdMesh.scale.x, y: c.lcdMesh.scale.y }
+                        }
+                    };
+                    if (c.type === 'display') {
+                        componentConfig.template = c.template;
+                        componentConfig.maxVal = c.maxVal;
+                    } else {
+                        componentConfig.publishPayload = c.publishPayload;
+                    }
+                    return componentConfig;
+                });
+            }
+            return exp;
+        });
+        
+        // 2. Convert the JavaScript object to a formatted JSON string
+        const jsonString = JSON.stringify({ sceneData: data }, null, 2);
+        
+        // 3. Create a Blob and trigger a file download
+        const blob = new Blob([jsonString], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        
+        const downloadLink = document.createElement('a');
+        downloadLink.href = url;
+        downloadLink.download = "digital_twin_config.json"; // Name of the downloaded file
+        document.body.appendChild(downloadLink);
+        downloadLink.click();
+        
+        // Cleanup
+        document.body.removeChild(downloadLink);
+        URL.revokeObjectURL(url);
+    };
+
+    function handleCameraMovement() {
+        const direction = new THREE.Vector3();
+        camera.getWorldDirection(direction);
+        direction.y = 0; // Keep movement horizontal
+        direction.normalize();
+
+        const right = new THREE.Vector3();
+        right.crossVectors(camera.up, direction).normalize();
+
+        const speed = 0.15;
+        const moveVector = new THREE.Vector3();
+        let moved = false;
+
+        if (keys.w || keys.arrowup) { moveVector.addScaledVector(direction, speed); moved = true; }
+        if (keys.s || keys.arrowdown) { moveVector.addScaledVector(direction, -speed); moved = true; }
+        if (keys.a || keys.arrowleft) { moveVector.addScaledVector(right, speed); moved = true; }
+        if (keys.d || keys.arrowright) { moveVector.addScaledVector(right, -speed); moved = true; }
+
+        if (moved) {
+            camera.position.add(moveVector);
+            controls.target.add(moveVector);
+        }
+    }
+
+    // --- Component Management ---
+    function createComponentMesh(componentId) {
+        const canvas = document.createElement('canvas');
+        canvas.width = 256; canvas.height = 150;
+        const texture = new THREE.CanvasTexture(canvas);
+        const mat = new THREE.MeshBasicMaterial({ map: texture, transparent: true });
+        const geo = new THREE.PlaneGeometry(1, 150/256);
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.name = `component_mesh_${componentId}`;
+        mesh.userData.componentId = componentId;
+        return mesh;
+    }
+
+    window.addComponent = (type) => {
+        if (!selectedObject || !selectedObject.userData.isIoT) return;
+
+        const componentId = `comp_${Date.now()}`;
+        const newComponent = { id: componentId, type: type, topic: '' };
+
+        if (type === 'display') {
+            newComponent.template = 'simple';
+            newComponent.maxVal = 10;
+        } else { // button
+            newComponent.publishPayload = 'trigger';
+        }
+
+        const mesh = createComponentMesh(componentId);
+        newComponent.lcdMesh = mesh;
+        newComponent.lcdCanvas = mesh.material.map.image;
+        newComponent.lcdTexture = mesh.material.map;
+
+        selectedObject.add(mesh);
+        selectedObject.userData.components.push(newComponent);
+
+        buildComponentUI(newComponent);
+        drawCanvasLCD(newComponent, 0);
+    };
+
+    function buildComponentUI(component) {
+        const container = document.getElementById('components-container');
+        const panel = document.createElement('div');
+        panel.className = 'component-panel';
+        panel.dataset.componentId = component.id;
+
+        let content = `<h4 class="component-title">${component.type} Component</h4>
+            <button class="remove-component-btn" onclick="removeComponent('${component.id}')">X</button>
+            <label>MQTT Topic:</label>
+            <input type="text" class="mqtt-topic" placeholder="topic/for/this/component" value="${component.topic || ''}">`;
+
+        if (component.type === 'display') {
+            content += `<label>Display Template:</label>
+                <select class="template-type">
+                    <option value="simple" ${component.template === 'simple' ? 'selected' : ''}>Simple Text</option>
+                    <option value="flowmeter" ${component.template === 'flowmeter' ? 'selected' : ''}>Advanced Flowmeter</option>
+                </select>
+                <div class="flow-settings" style="display: ${component.template === 'flowmeter' ? 'block' : 'none'}">
+                    <label style="color:#aaa;">Max Range:</label>
+                    <input type="number" class="flow-max" value="${component.maxVal || 10}">
+                </div>`;
+            panel.innerHTML = content;
+            panel.querySelector('.template-type').onchange = (e) => {
+                panel.querySelector('.flow-settings').style.display = e.target.value === 'flowmeter' ? 'block' : 'none';
+            };
+        } else { // button
+            content += `<label>Publish Payload:</label>
+                <input type="text" class="button-payload" value="${component.publishPayload || 'trigger'}">`;
+            panel.innerHTML = content;
+        }
+
+        const pos = component.lcdMesh.position;
+        const rot = component.lcdMesh.rotation;
+        const scale = component.lcdMesh.scale;
+
+        panel.innerHTML += `<label>LCD Offset (X, Y, Z):</label>
+            <div class="input-group">
+                <input type="number" class="pos-x" step="0.1" value="${pos.x.toFixed(2)}">
+                <input type="number" class="pos-y" step="0.1" value="${pos.y.toFixed(2)}">
+                <input type="number" class="pos-z" step="0.1" value="${pos.z.toFixed(2)}">
+            </div>
+            <label>LCD Tilt (Degrees):</label>
+            <div class="input-group">
+                <input type="number" class="rot-x" step="5" value="${THREE.MathUtils.radToDeg(rot.x).toFixed(0)}">
+                <input type="number" class="rot-y" step="5" value="${THREE.MathUtils.radToDeg(rot.y).toFixed(0)}">
+                <input type="number" class="rot-z" step="5" value="${THREE.MathUtils.radToDeg(rot.z).toFixed(0)}">
+            </div>
+            <label>LCD Scale (Width, Height):</label>
+            <div class="input-group">
+                <input type="number" class="scale-x" step="0.1" value="${scale.x.toFixed(2)}">
+                <input type="number" class="scale-y" step="0.1" value="${scale.y.toFixed(2)}">
+            </div>`;
+
+        container.appendChild(panel);
+    }
+
+    window.removeComponent = (componentId) => {
+        if (!selectedObject) return;
+        
+        // Remove from data array
+        const compIndex = selectedObject.userData.components.findIndex(c => c.id === componentId);
+        if (compIndex > -1) {
+            const [removedComp] = selectedObject.userData.components.splice(compIndex, 1);
+            // Remove 3D mesh from scene
+            if (removedComp.lcdMesh) {
+                selectedObject.remove(removedComp.lcdMesh);
+            }
+        }
+
+        // Remove UI panel
+        const panel = document.querySelector(`.component-panel[data-component-id="${componentId}"]`);
+        if (panel) panel.remove();
+    };
+
+    function animate() {
+        requestAnimationFrame(animate);
+        handleCameraMovement();
+        controls.update();
+        renderer.render(scene, camera);
+    }
+    animate();
+    
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+</script>
+</body>
+</html>
